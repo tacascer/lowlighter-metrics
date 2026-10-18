@@ -76,10 +76,7 @@ export class RecentAnalyzer extends Analyzer {
           seen.add(key)
           return true
         })
-        .map(async ({repository, sha}) => {
-          const [owner, repo] = repository.split("/")
-          return (await this.rest.repos.getCommit({owner, repo, ref: sha})).data
-        }),
+        .map(async ({url}) => (await this.rest.request(url)).data),
     ))
       .filter(({status}) => status === "fulfilled")
       .map(({value}) => value)

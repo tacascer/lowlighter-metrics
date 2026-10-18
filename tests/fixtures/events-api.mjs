@@ -62,7 +62,7 @@ function api(events = [event()]) {
         return {data: {number: 1, user: {login: "alice"}, title: "Fix", body: "Details", additions: 2, deletions: 1, changed_files: 1, merged: true}}
       },
     },
-    request: async () => ({data: detail()}),
+    request: async url => rest.repos.getCommit({owner: "alice", repo: "example", ref: url.split("/").pop()}),
   }
   return {rest, calls}
 }
