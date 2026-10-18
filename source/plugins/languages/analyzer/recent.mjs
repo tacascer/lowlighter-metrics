@@ -64,22 +64,26 @@ export class RecentAnalyzer extends Analyzer {
 
     //Retrieve edited files and filter edited lines (those starting with +/-) from patches
     this.debug("fetching patches")
-    const summaries = (await Promise.all(commits.map(event => pushCommits(this.rest, event))))
-      .flatMap((summaries, index) => summaries.map(commit => ({...commit, repository: commits[index].repo.name})))
-    const seen = new Set()
-    const patches = (await Promise.allSettled(
-      summaries
-        .filter(({repository, sha}) => {
-          const key = `${repository}/${sha}`
-          if (seen.has(key))
-            return false
-          seen.add(key)
-          return true
-        })
-        .map(async ({url}) => (await this.rest.request(url)).data),
-    ))
-      .filter(({status}) => status === "fulfilled")
-      .map(({value}) => value)
+    const summaries = []
+    for (const event of commits) {
+      const resolved = await pushCommits(this.rest, event)
+      summaries.push(...resolved.map(commit => ({...commit, repository: event.repo.name})))
+    }
+    const details = [], seen = new Set()
+    for (const {repository, sha, url} of summaries) {
+      const key = `${repository}/${sha}`
+      if (seen.has(key))
+        continue
+      seen.add(key)
+      try {
+        details.push((await this.rest.request(url)).data)
+      }
+      catch (error) {
+        if (![404, 409, 422].includes(error.status))
+          throw error
+      }
+    }
+    const patches = details
       .filter(({author, commit}) =>
         !this.authoring.length || [author?.login, commit.author?.name, commit.author?.email]
           .some(identifier => identifier && !filters.text(identifier, this.authoring.map(value => value.toLocaleLowerCase()), {debug: false}))

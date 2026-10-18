@@ -85,7 +85,7 @@ function analyzer(rest) {
   })
   return instance
 }
-function runActivity(rest) {
+function runActivity(rest, inputs = {}) {
   return activity({
     login: "alice",
     data: {shared: {"repositories.skipped": [], "users.ignored": []}},
@@ -93,7 +93,7 @@ function runActivity(rest) {
     q: {activity: true},
     account: "user",
     imports: {
-      metadata: {plugins: {activity: {enabled: () => true, inputs: () => ({limit: 10, load: 100, days: 0, filter: ["all"], visibility: "all", timestamps: false, skipped: [], ignored: []})}}},
+      metadata: {plugins: {activity: {enabled: () => true, inputs: () => ({limit: 10, load: 100, days: 0, filter: ["all"], visibility: "all", timestamps: false, skipped: [], ignored: [], ...inputs})}}},
       filters: {repo: () => true, text: () => true},
       markdown: async text => text,
       format: {error: error => error},
@@ -190,4 +190,46 @@ test("an unavailable pull request preserves unrelated events", async () => {
     throw Object.assign(new Error("gone"), {status: 404})
   }
   assert.deepEqual((await runActivity(rest)).events.map(({type}) => type), ["star"])
+})
+
+test("activity stops detail requests at the visible event limit", async () => {
+  const events = Array.from({length: 300}, (_, i) => ({...event(), type: "PullRequestEvent", payload: {action: "opened", number: i + 1, pull_request: {number: i + 1}}}))
+  const {rest} = api(events)
+  let requests = 0
+  const get = rest.pulls.get
+  rest.pulls.get = async args => {
+    if (++requests > 5)
+      throw Object.assign(new Error("secondary rate limit"), {status: 403})
+    return get(args)
+  }
+  const result = await runActivity(rest, {limit: 5})
+  assert.equal(result.events.length, 5)
+  assert.equal(requests, 5)
+})
+test("recent languages limits concurrent detail requests", async () => {
+  const {rest} = api(Array.from({length: 20}, () => event()))
+  let active = 0, maximum = 0
+  const compare = rest.repos.compareCommitsWithBasehead
+  rest.repos.compareCommitsWithBasehead = async args => {
+    active++
+    maximum = Math.max(maximum, active)
+    await new Promise(resolve => setImmediate(resolve))
+    active--
+    return compare(args)
+  }
+  await analyzer(rest).patches()
+  assert.ok(maximum <= 4, `Concurrent comparisons: ${maximum}`)
+})
+
+test("recent languages reports rate limits instead of omitting patches", async () => {
+  const {rest} = api()
+  rest.request = async () => {
+    throw Object.assign(new Error("secondary rate limit"), {status: 403})
+  }
+  await assert.rejects(analyzer(rest).patches(), {status: 403})
+})
+test("activity keeps filtering before it counts visible events", async () => {
+  const {rest} = api([event(), {...event(), type: "WatchEvent", payload: {action: "started"}}])
+  const result = await runActivity(rest, {limit: 1, filter: ["star"]})
+  assert.deepEqual(result.events.map(({type}) => type), ["star"])
 })
