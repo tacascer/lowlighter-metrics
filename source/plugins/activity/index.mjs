@@ -1,3 +1,6 @@
+//Imports
+import { pushCommits } from "../../app/metrics/events.mjs"
+
 //Setup
 export default async function({login, data, rest, q, account, imports}, {enabled = false, markdown = "inline", extras = false} = {}) {
   //Plugin execution
@@ -29,7 +32,7 @@ export default async function({login, data, rest, q, account, imports}, {enabled
     try {
       for (let page = 1; page <= pages; page++) {
         console.debug(`metrics/compute/${login}/plugins > activity > loading page ${page}/${pages}`)
-        events.push(...(context.mode === "repository" ? await rest.activity.listRepoEvents({owner: context.owner, repo: context.repo}) : await rest.activity.listEventsForAuthenticatedUser({username: login, per_page: 100, page})).data)
+        events.push(...(context.mode === "repository" ? await rest.activity.listRepoEvents({owner: context.owner, repo: context.repo, per_page: 100, page}) : await rest.activity.listEventsForAuthenticatedUser({username: login, per_page: 100, page})).data)
       }
     }
     catch {
@@ -48,6 +51,18 @@ export default async function({login, data, rest, q, account, imports}, {enabled
           const timestamp = new Date(created_at)
           if (!imports.filters.repo(repo, skipped))
             return null
+          if (["PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"].includes(type) && !payload.pull_request?.user) {
+            const [owner, name] = repo.split("/")
+            try {
+              const {data} = await rest.pulls.get({owner, repo: name, pull_number: payload.number ?? payload.pull_request?.number})
+              payload = {...payload, pull_request: data}
+            }
+            catch (error) {
+              if (error.status === 404)
+                return null
+              throw error
+            }
+          }
           switch (type) {
             //Commented on a commit
             case "CommitCommentEvent": {
@@ -136,7 +151,9 @@ export default async function({login, data, rest, q, account, imports}, {enabled
             }
             //Pushed commits
             case "PushEvent": {
-              let {size, commits, ref} = payload
+              const {ref} = payload
+              let commits = await pushCommits(rest, {repo: {name: repo}, payload})
+              const size = payload.size ?? commits.length
               commits = commits.filter(({author: {email}}) => imports.filters.text(email, ignored))
               if (!commits.length)
                 return null

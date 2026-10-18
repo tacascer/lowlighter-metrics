@@ -1,5 +1,6 @@
 //Imports
 import linguist from "linguist-js"
+import { pushCommits } from "../../../app/metrics/events.mjs"
 import { filters } from "../../../app/metrics/utils.mjs"
 import { Analyzer } from "./analyzer.mjs"
 
@@ -46,7 +47,7 @@ export class RecentAnalyzer extends Analyzer {
       for (let page = 1; page <= pages; page++) {
         this.debug(`fetching events page ${page}`)
         commits.push(
-          ...(await (this.context.mode === "repository" ? this.rest.activity.listRepoEvents(this.context) : this.rest.activity.listEventsForAuthenticatedUser({username: this.login, per_page: 100, page}))).data
+          ...(await (this.context.mode === "repository" ? this.rest.activity.listRepoEvents({...this.context, per_page: 100, page}) : this.rest.activity.listEventsForAuthenticatedUser({username: this.login, per_page: 100, page}))).data
             .filter(({type, payload}) => (type === "PushEvent") && ((this.context.mode !== "repository") || ((this.context.mode === "repository") && (payload?.ref?.includes?.(`refs/heads/${this.context.branch}`)))))
             .filter(({actor}) => (this.account === "organization") || (this.context.mode === "repository") ? true : !filters.text(actor.login, [this.login], {debug: false}))
             .filter(({repo: {name: repo}}) => !this.ignore(repo))
@@ -63,19 +64,31 @@ export class RecentAnalyzer extends Analyzer {
 
     //Retrieve edited files and filter edited lines (those starting with +/-) from patches
     this.debug("fetching patches")
-    const patches = [
-      ...await Promise.allSettled(
-        commits
-          .flatMap(({payload}) => payload.commits)
-          .filter(({committer}) => filters.text(committer?.email, this.authoring, {debug: false}))
-          .map(commit => commit.url)
-          .map(async commit => (await this.rest.request(commit)).data),
-      ),
-    ]
+    const summaries = (await Promise.all(commits.map(event => pushCommits(this.rest, event))))
+      .flatMap((summaries, index) => summaries.map(commit => ({...commit, repository: commits[index].repo.name})))
+    const seen = new Set()
+    const patches = (await Promise.allSettled(
+      summaries
+        .filter(({repository, sha}) => {
+          const key = `${repository}/${sha}`
+          if (seen.has(key))
+            return false
+          seen.add(key)
+          return true
+        })
+        .map(async ({repository, sha}) => {
+          const [owner, repo] = repository.split("/")
+          return (await this.rest.repos.getCommit({owner, repo, ref: sha})).data
+        }),
+    ))
       .filter(({status}) => status === "fulfilled")
       .map(({value}) => value)
+      .filter(({author, commit}) =>
+        !this.authoring.length || [author?.login, commit.author?.name, commit.author?.email]
+          .some(identifier => identifier && !filters.text(identifier, this.authoring.map(value => value.toLocaleLowerCase()), {debug: false}))
+      )
       .filter(({parents}) => parents.length <= 1)
-      .map(({sha, commit: {message, committer}, verification, files}) => ({
+      .map(({sha, commit: {message, committer, verification}, files}) => ({
         sha,
         name: `${message} (authored by ${committer.name} on ${committer.date})`,
         verified: verification?.verified ?? null,
